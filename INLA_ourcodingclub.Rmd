@@ -1,0 +1,1272 @@
+---
+title: "INLA_ourcodingclub"
+author: "Ania Kawiecki"
+date: "2/19/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Intro to INLA 
+
+https://ourcodingclub.github.io/tutorials/inla/
+
+
+## The data
+
+This tutorial is going to use a dataset working on a wild animal, trapped in a Scottish woodland. The experiment used a combination of individual anthelminthic treatment and nutritional supplementation to investigate how they impacted parasite intensity.
+
+## The research question
+
+How do different treatments influence parasite activity and is that influenced by spatial patterns?
+
+The researchers trapped Hosts in four grids, two of which were supplemented with high-quality food. Some individuals were treated with antiparasitic compounds, and others were not. At each capture, phenotypic data such as body condition were taken and Parasites were counted.
+
+## Import the data
+Let’s import the data.
+
+```{r read in data}
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+
+Root <- getwd() # This should be the path to your working directory
+
+Hosts <- read.csv(paste0(Root, "/HostCaptures.csv"), header = T)
+
+head(Hosts)
+
+substr(names(Hosts), 1, 1) <- toupper(substr(names(Hosts), 1, 1)) # Giving the host names capital letters
+
+phen <- c("Grid", "ID", "Easting", "Northing") # Base columns with spatial information we'll need
+
+resp <- "Parasite.count" # Response variable
+
+covar <- c("Month", # Julian month of sampling
+           "Sex", # Sex
+           "Smi", # Body condition
+           "Supp.corrected", # Nutrition supplementation
+           "Treated") # Treatment
+
+TestHosts <- na.omit(Hosts[, c(phen, resp, covar)]) # Getting rid of NA's, picking adults
+# We are using the [] to subset and only extract specific columns
+
+# Turning variables into factors
+TestHosts$Month <- as.factor(TestHosts$Month)
+TestHosts$Grid <- as.factor(TestHosts$Grid)
+
+TestHosts$Parasite.count <- round(TestHosts$Parasite.count) # Parasite counts should be integers
+
+table(table(TestHosts$ID)) # Enough repeat samples for a mixed model?
+```
+
+We need to make sure that there are enough repeat samples of specific individuals. Table will count up how many of them there are, and using table(table()) is a quick way to show the distribution of repeat sampling. Looks like we have enough repeat samples for a mixed effect model!
+
+INLA works like many other statistical analysis packages, such as lme4 or MCMCglmm. If you run the same simple models in these packages, it should get similar results.
+
+Plot the sampling locations in space. As they are trapped in a grid formation, make sure they are jittered.
+
+
+```{r jitter plot}
+# Setting up a custom theme
+THEME <- theme(axis.text.x = element_text(size = 12,colour = "black"),
+               axis.text.y = element_text(size = 12, colour = "black"),
+               axis.title.x = element_text(vjust = -0.35),
+               axis.title.y = element_text(vjust = 1.2)) + theme_bw()
+
+(samp_locations <- ggplot(TestHosts, aes(Easting, Northing)) + 
+	geom_jitter(aes(colour = factor(Grid))) + coord_fixed() + 
+	THEME + 
+	labs(colour = "Grid"))
+
+```
+
+
+Recall that putting your entire ggplot code in brackets () creates the graph and then shows it in the plot viewer. If you don’t have the brackets, you’ve only created the object, but haven’t visualized it. You would then have to call the object such that it will be displayed by just typing samp_locations after you’ve created the “samp_locations” object.
+
+
+How often are different individuals trapped on different grids?
+```{r diff grids}
+
+length(unique(TestHosts$ID))
+
+table(with(TestHosts, tapply(Grid, ID, function(x) length(unique(x)))))
+
+#42 ind caught on one grid, 10 on 2 grids and 1 on 3 different grids.
+
+```
+
+
+Not much moving around! Looks like individuals tend to stay on the same grid.
+
+## perform model selection 
+
+Model selection is a method that reduces the amount of covariates that are included in the data to stop overfitting. This will increase the generality of your models, and is good practise!
+
+First, we will set up a full analysis using all the covariates that we reckon will influence the data. As I’ve said above, you can use INLA like any other modelling package, but here I’m going to use formula specification before the models.
+
+
+```{r model 1 and 2}
+
+# First without random effects ####
+
+# Specify the formula
+f0.1 <- as.formula(paste0(resp, " ~ ", # Response first
+                          paste(covar, collapse = " + ") # Collapse the vector of covariates
+))
+
+#Parasite.count ~ Month + Sex + Smi + Supp.corrected + Treated
+
+# Run the model
+IM0.1  <- inla(Parasite.count ~ Month + Sex + Smi + Supp.corrected + Treated, 
+               family = "nbinomial", # Specify the family. Can be a wide range (see r-inla.org).
+               data = TestHosts) # Specify the data
+
+# Run the model # (This is the same thing)
+IM0.1  <- inla(f0.1, 
+               family = "nbinomial", # Specify the family. Can be a wide range (see r-inla.org).
+               data = TestHosts) # Specify the data
+
+# Then with an ID random effect ####
+
+f0.2 <- as.formula(paste0(resp, " ~ ", 
+                          paste(covar, collapse = " + "), 
+                          " +  f(ID, model = 'iid')")) # This is how you include  a typical random effect.
+
+#Parasite.count ~ Month + Sex + Smi + Supp.corrected + Treated + f(ID, model = "iid")
+
+IM0.2  <- inla(f0.2, 
+               family = "nbinomial",
+               data = TestHosts) 
+
+summary(IM0.1)
+summary(IM0.2)
+
+#Next, we will visualise the results of our models. We will plot the effect sizes and the credible intervals around them. This uses some functions which I’ve packaged in my ggregplot package!
+
+Efxplot(list(IM0.1, IM0.2))
+```
+
+This shows a load of significant effects: months, sex, treatment. Looks promising!
+
+NB: There are no P values in INLA. Importance or significance of variables can be deduced by examining the overlap of their 2.5% and 97.5% posterior estimates with zero.
+
+
+It’s likely that this model is overloaded with explanatory variables. Let’s carry out model selection to remove the covariates that are unimportant.
+
+This involves removing covariates one by one and seeing how this changes model fit according to the model’s Deviance Information Criterion (DIC, a Bayesian measure analogous to the Akaike Information Criterion (AIC)). If removing any number of covariates does not increase a model’s DIC by a threshold number (I use 2 DIC) then the covariate with the lowest impact is removed. This process is repeated, using fewer and fewer covariates each time, until eventually you end up with a minimal model where removing any covariates increases the DIC by greater than the threshold value.
+
+Instead of doing this manually, which takes time and a lot of code and is boring, I threw together a function (INLAModelSel in the ggregplot package) which will do it for us.
+
+NB: This is a demonstration not a setup for a perfect analysis. Remember to:
+
+Explore your data.
+Be careful of outliers.
+Do not include highly-correlated covariates.
+
+If you don’t explore your data thoroughly things can easily go wrong. Do not rely on this function for analysis without thinking about it and checking your data thoroughly!
+
+We can apply the function to our data and see which variables we should include in our models.
+
+
+
+```{r model selection}
+
+HostModelSel <- INLAModelSel(resp, covar, "ID", "iid", "nbinomial", TestHosts)
+
+Finalcovar <- HostModelSel$Removed[[length(HostModelSel$Removed)]]
+
+f1 <- as.formula(paste0(resp, " ~ ", 
+                        paste(Finalcovar, collapse = " + "), 
+                        "+ f(ID, model = 'iid')")) 
+
+IM1 <- inla(f1,
+            family = "nbinomial",
+            data = TestHosts,
+            control.compute = list(dic = TRUE)) 
+
+summary(IM1)
+```
+
+We ended up removing body condition, and food supplementation, while treatment, sex, and month remained in the final model.
+
+A reminder that there are no P values in INLA. Importance or significance of variables can be deduced by examining the overlap of their 2.5% and 97.5% posterior estimates with zero. This is made easier by plotting them. I prefer using DIC to compare variables’ contributions to model fit rather than looking exclusively at the model estimates.
+
+### spatial autocorrelation
+
+To examine the importance of spatial autocorrelation, we then look at the DIC of a series of competing models with different random effect structures. I have decided that, given the layout of my sampling locations, there are a few potential ways to code spatial autocorrelation in this dataset.
+
+Spatial autocorrelation constant across the study period, and across the study area (spatial, 1 mesh).
+Spatial autocorrelation constant across the study area, varying across the study period (spatiotemporal, X meshes).
+Spatial autocorrelation varying within each grid to ignore spatial patterns between grids (spatial, 4 meshes).
+
+We will make these models, compete them with each other, and investigate whether the inclusion of spatial random effects changes our fixed effect estimates (does including spatial variation change whether we think males have higher Parasite counts, for example?)
+
+## Learn the components of an INLA model
+The setup so far has involved using quite simple model formulae. The next step is where people often become frustrated, as it involves model setups which are more unique to INLA and hard to pick apart.
+
+A bit about INLA
+INLA is computationally efficient because it uses a SPDE (Stochastic Partial Differentiation Equation) to estimate the spatial autocorrelation of the data. This involves using a “mesh” of discrete sampling locations which are interpolated to estimate a continuous process in space (see very helpful figure).
+
+### mesh
+
+```{r mesh}
+
+Locations = cbind(TestHosts$Easting, TestHosts$Northing) # using the sampling locations 
+
+MeshA <- inla.mesh.2d(jitter(Locations), max.edge = c(20, 40))
+MeshB <- inla.mesh.2d(Locations, max.edge = c(20, 40))
+MeshC <- inla.mesh.2d(Locations, max.edge = c(10, 20))
+
+plot(MeshA)
+points(Locations, col = "red", pch = 2)
+
+plot(MeshB)
+points(Locations, col = "red", pch = 2)
+
+plot(MeshC)
+
+points(Locations, col = "red", pch = 2)
+
+Mesh <- MeshB
+
+```
+
+There are several important aspects of a mesh. The triangle size (determined using a combination of max.edge and cutoff) determines how precisely the equations will be tailored by the data. Using smaller triangles increases precision but also exponentially increases computing power. Generally, the mesh function automatically creates a mesh like mesh A, where closer-together sampling locations produce smaller triangles. The sampling locations in this dataset are so evenly spaced that I had to jitter them to show this in mesh A. When exploring/setting up preliminary analyses, use a mesh like mesh B. for analyses to be reported in a paper, use a mesh like mesh C. Be careful of edges, and try to allow some space around your sampling area for INLA to estimate. The edge triangles can be bigger to reduce computing power.
+
+After the mesh has been set up, we need to feed INLA a way to convert this into a model format. This uses an A matrix, which essentially translates spatial locations on the mesh into vectors in the model.
+
+```{r A matrix}
+# Making the A matrix
+
+HostsA <- inla.spde.make.A(Mesh, loc = Locations) # Making A matrix
+Hosts.spde = inla.spde2.pcmatern(mesh = Mesh, prior.range = c(10, 0.5), prior.sigma = c(.5, .5)) # Making SPDE
+w.Host <- inla.spde.make.index('w', n.spde = Hosts.spde$n.spde) # making the w
+
+```
+
+The A matrix is combined with the model matrix and random effects in a format called a stack.
+
+```{r stack }
+
+
+# Making the model matrix #### 
+
+X0 <- model.matrix(as.formula(paste0(" ~ -1 + ", paste(Finalcovar, collapse = " + "))), data = TestHosts) # make the model matrix using the final model selection formula without a response variable.
+
+X <- as.data.frame(X0[,-which(colnames(X0)%in%c("Month7"))]) # convert to a data frame. Eliminate the base level of the first categorical variable if applicable (you will manually specify an intercept below) 
+
+head(X)
+
+# Making the stack ####
+
+N <- nrow(TestHosts)
+
+StackHost <- inla.stack(
+  data = list(y = TestHosts[,resp]), # specify the response variable
+  
+  A = list(1, 1, 1, HostsA), # Vector of Multiplication factors for random and fixed effects              
+  
+  effects = list(
+    
+    Intercept = rep(1, N), # specify the manual intercept!
+    
+    X = X, # attach the model matrix
+    
+    ID = TestHosts$ID, # insert vectors of any random effects
+    
+    w = w.Host)) # attach the w 
+
+```
+
+The stack includes (in this order in my code)….
+
+1. The response variable (coded as “y”)
+
+2. A vector of multiplication factors. This is generally a series of 1’s (for the intercept, random effects, and fixed effects), followed by the spatial A matrix which you specified earlier.
+
+3. The effects. You need to separately specify the intercept, the random effects, the model matrix, and the spde. The thing to remember is that the components of part 2 of the stack (multiplication factors) are related to the components of part 3 (the effects). Adding an effect necessitates adding another 1 to the multiplication factors (in the right place).
+
+Adding a random effect? Whack it in the effects, add a 1 to the A vector.
+
+
+Example: 
+Say I was trying to add a random effect of grid:
+```{r stack example, eval=FALSE}
+N <- nrow(TestHosts)
+
+BADSTACK <- inla.stack(
+  data = list(y = TestHosts[,resp]), # specify the response variable
+  
+  A = list(1, 1, 1, HostsA), # Vector of Multiplication factors for random and fixed effects              
+  
+  effects = list(
+    
+    Intercept = rep(1, N), # specify the manual intercept!
+    
+    X = X, # attach the model matrix
+    
+    ID = TestHosts$ID, # insert vectors of any random effects
+    Grid = TestHosts$Grid,
+    
+    w = w.Host)) # Leave
+
+#What have I done wrong here? Let’s rectify it.
+
+
+N <- nrow(TestHosts)
+
+GOODSTACK <- inla.stack(
+  data = list(y = TestHosts[,resp]), # specify the response variable
+  
+  A = list(1, 1, 1, 1, HostsA), # Vector of Multiplication factors for random and fixed effects              
+  
+  effects = list(
+    
+    Intercept = rep(1, N), # specify the manual intercept!
+    
+    X = X, # attach the model matrix
+    
+    ID = TestHosts$ID, # insert vectors of any random effects
+    Grid = TestHosts$Grid,
+    
+    w = w.Host)) # Leave
+    
+```
+
+### running the model
+
+So, we have everything set up to conduct a spatial analysis. All we need is to put it into the inla function and see what happens. Fortunately, once you specify the stack you can add it into the data = argument and then changing the formula will run whatever variation you need (as long as it only uses A, W, random and fixed effects that already exist in the stack).
+
+So, for completeness let’s try out three competing models:
+
+only fixed effects,
+fixed + ID random effects,
+fixed + ID + SPDE random effects.
+
+```{r spatial model}
+
+f1 <- as.formula(paste0("y ~ -1 + Intercept + ", paste0(colnames(X), collapse = " + ")))
+f2 <- as.formula(paste0("y ~ -1 + Intercept + ", paste0(colnames(X), collapse = " + "), " +  f(ID, model = 'iid')"))
+f3 <- as.formula(paste0("y ~ -1 + Intercept + ", paste0(colnames(X), collapse = " + "), " +  f(ID, model = 'iid') + f(w, model = Hosts.spde)"))
+
+
+IM1 <- inla(f1, # Base model (no random effects)
+            family = "nbinomial",
+            data = inla.stack.data(StackHost),
+            control.compute = list(dic = TRUE),
+            control.predictor = list(A = inla.stack.A(StackHost))
+)
+
+IM2 <- inla(f2, # f1 + Year and ID random effects
+            family = "nbinomial",
+            data = inla.stack.data(StackHost),
+            control.compute = list(dic = TRUE),
+            control.predictor = list(A = inla.stack.A(StackHost))
+)
+
+IM3 <- inla(f3, # f2 + SPDE random effect 
+            family = "nbinomial",
+            data = inla.stack.data(StackHost),
+            control.compute = list(dic = TRUE),
+            control.predictor = list(A = inla.stack.A(StackHost))
+)
+
+SpatialHostList <- list(IM1, IM2, IM3)
+```
+
+### Plotting the spatial field
+```{r Plotting the spatial field}
+
+ggField(IM3, Mesh, Groups = 1) +
+  scale_fill_brewer(palette = "Blues") 
+
+# always use a single-dimension colour palette if you can! It's just easier on the eyes, 
+# better for colourblind people, makes sense in black and white, etc.
+
+# ignore the Groups part of the function for now. That'll come later.
+```
+
+At what range does autocorrelation fade in space? INLA models with a large kappa (inverse range) parameter change very quickly in space. Those with a large range and small kappa parameter have much longer, slower gradients
+
+### range
+
+
+```{r range, echo= FALSE}
+# function takes (a list of) models and plots the decay of spatial autocorrelation across a user-defined range
+
+# let's try it on our model ###
+
+# Define the maximum range as something reasonable: the study area is 80 eastings wide, so lets go for:
+
+Maxrange = 40
+
+INLARange(list(IM3), maxrange = Maxrange)
+```
+
+However, being able to visualise spatial patterns does not necessarily mean that spatial autocorrelation is affecting the model substantially, and range does not correspond to the importance of autocorrelation! In order to investigate that, we have to look at model fit. How does the DIC of these models compare?
+
+
+```{r compare models}
+sapply(SpatialHostList, function(f) f$dic$dic)
+
+# Let's try it on our data ####
+
+INLADICFig(SpatialHostList, ModelNames = c("Base", "IID", "SPDE"))
+```
+Seems like spatial autocorrelation doesn’t affect these data the way we’ve coded it! Whoever carried out this study could keep going as they were and not worry any more about spatial autocorrelation. Except we had some expectations that there might be other varieties of spatial autocorrelation at work here.
+
+If I had had no more ###a priori### expectations for this study, I would stop here. Don’t keep analysing different variables or combinations of variables until eventually you find a variety of spatial autocorrelation that affects your data.
+
+
+### seasonal model 
+
+```{r season}
+# Specifying a new set of SPDE components ####
+
+Groups = "Month"
+
+NGroups <- length(unique(TestHosts[,Groups])) 
+
+# make A matrix 
+HostA2 <- inla.spde.make.A(Mesh, # Leave
+                           loc = Locations, # Leave
+                           group = as.numeric(as.factor(TestHosts[,Groups])),# this must be a numeric value counting from 1. If the groups variable is a factor, this will happen by default.
+                           n.group = NGroups) 
+
+
+w.Host2 <- inla.spde.make.index(
+  name    = 'w', 
+  n.spde  = Hosts.spde$n.spde,
+  n.group = NGroups)  
+
+StackHost2 <- inla.stack( 
+  data = list(y = TestHosts[,resp]), # Leave
+  
+  A = list(1, 1, 1, HostA2), # Change the A matrix to the new one
+  
+  effects = list(
+    Intercept = rep(1, N), # Leave
+    X = X, # Leave
+    ID = TestHosts$ID, # Leave
+    
+    w = w.Host2)) # CHANGE
+
+f4 = as.formula(paste0("y ~ -1 + Intercept + ", paste0(colnames(X), collapse = " + "), 
+                       " +  f(ID, model = 'iid') +  f(w, model = Hosts.spde, 
+group = w.group,                           # This bit is new! 
+control.group = list(model = 'iid'))"))
+
+inla.setOption(num.threads = 8) 
+
+IM4 <- inla(f4,
+            family = "nbinomial",
+            data = inla.stack.data(StackHost2), # Don't forget to change the stack!
+            control.compute = list(dic = TRUE),
+            control.predictor = list(A = inla.stack.A(StackHost2)) # Twice!
+)
+
+#add IM4 to list of models
+
+SpatialHostList[[4]] <- IM4
+
+Labels = c("July", "August", "September", "October", "November")
+names(Labels) <- c(1:NGroups)
+
+ggField(IM4, Mesh, Groups = NGroups) + # Notice the groups argument, using the number of unique months.
+  scale_fill_brewer(palette = "Reds") + 
+  facet_wrap( ~ Group, labeller = labeller(Group = Labels), ncol = 3) # Doing this manually changes the facet labels
+  
+```
+
+```{r seasonal range}
+INLARange(SpatialHostList[3:4], maxrange = Maxrange, mesh = Mesh, ModelNames = c("Full", "Monthly"))
+```
+
+There is a faster way to split spatial fields into groups, using repl instead of splitting it into groups and connecting them via iid models. However, I’m showing you this method as it’s a way into spatiotemporal models. 
+
+In the above model, we have assumed that monthly spatial fields are totally unrelated to each other. However, we can use an “exchangeable” model to force a correlation between them, and to derive a rho correlation between the fields.
+
+
+```{r correlated time}
+
+f5 = as.formula(paste0("y ~ -1 + Intercept + ", paste0(colnames(X), collapse = " + "), 
+                       "+ f(ID, model = 'iid') +  f(w, model = Hosts.spde, 
+                       group = w.group, # This bit is new! 
+                       control.group = list(model='exchangeable'))"))
+
+#inla.setOption(num.threads = 8) 
+
+IM5 <- inla(f5,
+         family="nbinomial",
+         data = inla.stack.data(StackHost2),
+         control.compute = list(dic = TRUE),
+         control.predictor = list(A = inla.stack.A(StackHost2))
+)
+
+SpatialHostList[[5]] <- IM5
+
+```
+
+NB: with Exchangeable, all fields are correlated to the same extent. If we used AR1 (a typical temporal autocorrelation model used to link spatial fields), fields closer to each other in time would be more highly correlated than those further apart. It takes more time than we have to run, and requires more data than I have to converge. So try that out on your own data if you’re keen and you think it’ll work. I’m happy to help!
+
+
+```{r compare all models}
+# Same functions as above! 
+
+INLADICFig(SpatialHostList, ModelNames = c("Base", "IID", "SPDE", "SPDE2", "SPDE3"))
+```
+
+
+```{r spatial fields spatio-temporal}
+ggField(IM5, Mesh, Groups = NGroups) + # Notice the groups argument, using the number of unique months.
+  scale_fill_brewer(palette = "Greens") 
+```
+
+### Within-grid model
+Let’s try using repl instead of group, just for completeness’s sake. Just to recap: this is slightly quicker, but can only be used when you’re not specifying a link between the fields.
+
+We’re going to see if restricting the study area to four identically-shaped grid meshes will improve fit, rather than having a lot of empty space in the countryside where no Hosts were ever caught.
+
+In order to do this, we have to recode the data slightly.
+
+```{r within grid}
+Group2 = "Grid"
+
+TestHosts$Easting2 <- TestHosts$Easting - with(TestHosts, tapply(Easting, Grid, min))[TestHosts$Grid]
+TestHosts$Northing2 <- TestHosts$Northing - with(TestHosts, tapply(Northing, Grid, min))[TestHosts$Grid]
+
+Locations2 = cbind(TestHosts$Easting2, TestHosts$Northing2)
+
+Mesh2 <- inla.mesh.2d(Locations2, max.edge = c(20, 40))#, cutoff = 0.8)
+
+NGroup2 <- length(unique(TestHosts[,Group2]))
+
+Hosts.spde2 = inla.spde2.pcmatern(mesh = Mesh2, prior.range = c(10, 0.5), prior.sigma = c(.5, .5)) # Making SPDE
+
+HostA3 <- inla.spde.make.A(Mesh2, loc = Locations2,
+                           repl = as.numeric(TestHosts[,Group2]),
+                           n.repl = NGroup2)
+
+w.Host3 <- inla.spde.make.index(
+  name    = 'w', 
+  n.spde  = Hosts.spde2$n.spde,
+  n.repl = NGroup2)  
+
+StackHost3 <- inla.stack(
+  data = list(y = TestHosts[,resp]),  
+  A = list(1, 1, 1, HostA3), # Change A matrix
+  effects = list(
+    
+    Intercept = rep(1, N), # Leave
+    
+    X = X, # Leave
+    
+    ID = TestHosts$ID, # Leave
+    
+    w = w.Host3)) # Change 
+
+f6 = as.formula(paste0("y ~ -1 + Intercept + ", paste0(colnames(X), collapse = " + "), 
+                       " +  f(ID, model = 'iid') +   
+                       f(w, model = Hosts.spde2, replicate = w.repl)")) # Not necessary to specify a linking model
+
+IM6 <- inla(f6,
+           family = "nbinomial",
+           data = inla.stack.data(StackHost3),
+           control.compute = list(dic = TRUE),
+           control.predictor = list(A = inla.stack.A(StackHost3))
+)
+
+SpatialHostList[[6]] <- IM6
+
+INLADICFig(SpatialHostList, ModelNames = c("Base", "IID", "SPDE", "SPDE2", "SPDE3", "GridSPDE"))
+
+TestHosts$Group <- TestHosts$Grid
+  
+Labels2 <- paste0("Grid ", 1:4)
+names(Labels2) <- 1:4
+
+ggField(IM6, Mesh2, Groups = NGroup2)  + 
+  facet_wrap(~Group, labeller = labeller(Group = Labels2)) + scale_fill_brewer(palette = "Oranges") + 
+  ggsave("Fields6.png", units = "mm", width = 120, height = 100, dpi = 300)
+```
+
+Has this fit the data better? Nope!
+
+
+### Final summary
+The best-fitting model is SPDE 3 (model 5). This features different spatial fields for each month, with correlation between the fields. However, this formulation only slightly improves model fit over the non-spatial models, so we shouldn’t worry too much about the spatial effects we’re seeing! Good news. Also, if you run the code below, you will see that the effect estimates barely differ between these models. So, even though space has an effect, the effect is small and doesn’t modify our previous conclusions! Congratulations, your system is robust to spatial dependence effects!
+
+
+
+```{r final}
+Efxplot(SpatialHostList, ModelNames = c("Base", "IID", "SPDE", "SPDE2", "SPDE3", "GridSPDE"))
+```
+
+
+# Hierarchical modelling of spatial data
+
+https://ourcodingclub.github.io/tutorials/spatial-modelling-inla/
+
+## The question
+
+Is the amount of greenspace significantly correlated with:
+
+A) The number of fox scats found?
+
+B) The number of parasite species (species richness) found in each scat?
+
+The data I am going to use includes area data of the number of scats found (The hexagonal lattice in the figure) and the point data of the parasite richness we found per sample.
+
+## areal data
+
+We are going to test the hypothesis that a higher greenspace ratio (a higher percentage of green areas) is associated with a higher number of scats found. We are going to use a dataset I have modified for the purpose of this tutorial. The data refer to the number of fox scats found in the city of Edinburgh during a 6 months survey of every public green area in the city.
+
+To do so, I have constructed a lattice that covers the study area, and for each zone recorded the number of scats found, along with the greenspace ratio, calculated using the Greenspace Dataset from Edina Digimap.
+
+
+
+```{r 2. data}
+# Load the lattice shapefile and the fox scat data
+require(sp)  # package to work with spatial data
+require(rgdal)  # package to work with spatial data
+
+# Fox lattice is a spatial object containing the polygons constructed on the basis of the data
+# (normally you would use administrative district)
+Fox_Lattice <- readOGR("Fox_Lattice/Fox_Lattice.shp") 
+
+#Warning message:
+#In readOGR("Fox_Lattice/Fox_Lattice.shp") : Z-dimension discarded
+# Ignore this warning message, this is showing since there is not a z-value assigned to each cell (we have attached our response value as a data frame instead)
+
+require(RColorBrewer)
+# Create a colour palette to use in graphs
+my.palette <- brewer.pal(n = 9, name = "YlOrRd")
+
+# Visualise the number of scats across space
+spplot(obj = Fox_Lattice, zcol = "Scat_No",
+       col.regions = my.palette, cuts = 8)
+```
+
+
+As mentioned previously, INLA needs to know which areas are neighbouring, so it can compute the spatial autocorrelation structure, we do that by computing the adjacency matrix.
+
+```{r 2. adj matrix}
+# We can extract the data frame attached to the shape (file extensioon shp) object 
+Lattice_Data <- Fox_Lattice@data
+str(Lattice_Data)
+
+require(spdep)  # a package that can tabulate contiguity in spatial objects, i.e., the state of bordering or being in contact with something
+require(INLA)  # for our models!
+
+# Specify the adjacency matrix
+Lattice_Temp <- poly2nb(Fox_Lattice)  # construct the neighbour list
+nb2INLA("Lattice.graph", Lattice_Temp) # create the adjacency matrix in INLA format
+Lattice.adj <- paste(getwd(),"/Lattice.graph",sep="") # name the object
+
+inla.setOption(scale.model.default = F)
+H <- inla.read.graph(filename = "Lattice.graph")  # and save it as a graph
+
+# Plot adjacency matrix 
+image(inla.graph2matrix(H), xlab = "", ylab = "")
+```
+
+This matrix shows the neighbouring for each cell. You have the cell numerical ID (ZONE_CODE) on both axis and you can find which cells they are neighbouring with (plus the diagonal which means that the cells neighbour with themselves). For example you can trace with your eyes cell number 50 and see its neighbours (cells 49 and 51). Each line will have up to 6 neighbours (hexagons have 6 edges), corresponding to the number of neighbours of the lattice cell. Note that in this case the cells were already sorted in alphabetical order so they are only adjacent to ones with a similar name, so you have a clump of adjacent cells around the diagonal line. When using administrative districts this matrix will likely be messier.
+
+We also need to specify the model formula. This model will test whether there is a linear effect of greenspace ratio (GS_ratio) on the number of fox scats found in each area across Edinburgh. We will do the model formula first, which doesn’t actually run our model, and we will do the running part in the next step.
+
+
+```{r 2 area formula } 
+formula <- Scat_No ~ 1 + GS_Ratio + # fixed effect
+  f(ZONE_CODE, model = "bym",       # spatial effect: ZONE_CODE is a numeric identifier for each area in the lattice  (does not work with factors)
+    graph = Lattice.adj)            # this specifies the neighbouring of the lattice areas
+```
+
+NOTE: The spatial effect is modelled using the BYM (Besag, York and Mollie’s model) is the model type usually used to fit area data. CAR (conditional auto-regressive) and besag models are other options, but here we will focus on BYM since that is appropriate way to model the spatial effect when working with area data. Now we are ready to run our model!
+
+```{r 2 area model}
+# Finally, we can run the model using the inla() function
+Mod_Lattice <- inla(formula,     
+                    family = "poisson",  # since we are working with count data
+                    data = Lattice_Data,
+                    control.compute = list(cpo = T, dic = T, waic = T))  
+# CPO, DIC and WAIC metric values can all be computed by specifying that in the control.compute option
+# These values can then be used for model selection purposes if you wanted to do that
+
+# Check out the model summary
+summary(Mod_Lattice)
+```
+
+We’ve now ran our first INLA model, nice one!
+
+In the output you can find some general information about the model: the time it took to run, a summary of the fixed effects, and model selection criteria (if you have specified them in the model), as well as the precision for any random effects (in this case just our spatial component ZONE_CODE). It is important to remember that INLA works with precision (tau = 1/Variance), so higher values of precision would correspond to lower values of variance.
+
+We can see that GS_Ratio has a positive effect on the number of scats found (the 0.025q and 0.075 quantiles do not cross zero so this is a “significant” positive effect), and that the iid (random factorial effect) of ZONE_CODE id has a much lower precision than the spatial effect, which means that using ZONE_CODE as a standard factorial random effect would probably suffice in this case
+
+### setting priors
+
+We can also set priors for the hyperparameters (the parameters of the prior distribution) by specifying them in the formula. INLA works with precision (tau = 1/Variance) so a very low precision corresponds to a very high variance by default. Keep in mind that the priors need to be specified for the linear predictor of the model (so they need to be transformed according to the data distribution) in this case they follow a log gamma distribution (since it’s a Poisson model).
+
+```{r 2 priors}
+formula_p <- Scat_No ~ 1 + GS_Ratio + 
+  f( ZONE_CODE, model = "bym", 
+     graph = Lattice.adj, 
+     scale.model = TRUE,
+     hyper = list(
+       prec.unstruct = list(prior = "loggamma", param = c(1,0.001)),   # precision for the unstructured effect (residual noise)
+       prec.spatial =  list(prior = "loggamma", param = c(1,0.001))    # precision for the spatial structured effect
+       )
+     )
+
+Mod_Lattice_p <- inla(formula_p,
+                    family = "poisson",
+                    data = Lattice_Data,
+                    control.compute = list(cpo = T)
+                  )
+                                    
+summary(Mod_Lattice_p)
+
+# We can extract the summary of the fixed effects (in this case only GS)
+round(Mod_Lattice$summary.fixed, 3)
+```
+
+The posterior mean for the random (spatial) effect can also be computed and plotted overlayed to the lattice. To do so, we need to extract the posterior mean of the spatial effect for each of the cells in the lattice (using the emarginal() function) and then add it to the original shapefile so we can map it.
+
+This represents the distribution in space of the response variable, once you accounted for the covariates included in the model. Think of it as the “real distribution” of the response variable in space, according to the model (obviously this is only as good as the model we have and will suffer if the estimation are poor, we have missing data or we failed to include an important covariate in our model).
+
+First we select the marginal posterior distributions of the spatial random effect for each area using the Nareas index, then we use lapply() to calculate the value of the posterior mean of the spatial random effect (zeta) from the marginal distributions for each #area (we exponentiate the distibutions to convert them into real numbers, as the output of the model is expressed in the linear predictor scale of the model which was a log scale).
+
+```{r 2 area marginals, warning = FALSE}
+# Calculating the number of areas
+Nareas <- length(Lattice_Data[,1])
+
+# select the posterior marginal distribution for each zone
+# these correspond to the first 347 (number of cells) items of the marginal distribution for the spatial random effect (zeta)
+zone.index <- Mod_Lattice$marginals.random$ZONE_CODE[1:Nareas]
+# exponentiate each of the zone marginals to return it to its original values (remember that this is a poisson model so all the components of the model are log-transformed)
+zeta <- lapply(zone.index,function(x) inla.emarginal(exp,x))  
+
+zeta.cutoff <- c(0, 1, 2, 5, 9, 15, 20, 35, 80, 800)   # we make a categorisation to make visualisation easier
+
+cat.zeta <- cut(unlist(zeta),
+                breaks = zeta.cutoff,
+                include.lowest = TRUE)
+
+# Create a dataframe with all the information needed for the map
+maps.cat.zeta <- data.frame(ZONE_CODE = Lattice_Data$ZONE_CODE, 
+                            cat.zeta = cat.zeta)
+
+# Create a new polygon from Fox_Lattice and add the value of the posterior mean
+Fox_Lattice_post <- Fox_Lattice
+data.fox.post <- attr(Fox_Lattice_post, "data")
+attr(Fox_Lattice_post, "data") <- merge(data.fox.post, 
+                                       maps.cat.zeta, 
+                                       by = "ZONE_CODE")
+
+#Now we are ready to make a colour palette and make our map!
+
+my.palette.post <- rev(brewer.pal(n = 9, name = "YlGnBu"))
+spplot(obj = Fox_Lattice_post, zcol = "cat.zeta",
+       col.regions = my.palette.post)
+```
+
+
+Similarly, we can plot the uncertainty associated with the posterior mean. As with any modelling, important to think not just about the mean, but how confident we are in that mean.
+
+
+```{r 2 uncertainty, warning=FALSE}
+a <- 0
+prob.zone <- lapply(zone.index, function(x) {1 - inla.pmarginal(a, x)})
+
+prob.zone.cutoff <- c(0, 0.1, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1)
+cat.prob.zone <- cut(unlist(prob.zone),
+                    breaks = prob.zone.cutoff, 
+                    include.lowest = T)
+
+# Create a new polygon from Fox_Lattice and add the value of the posterior sd
+maps.cat.prob.zone <- data.frame(ZONE_CODE = Lattice_Data$ZONE_CODE, 
+                                cat.prob.zone = cat.prob.zone)
+
+Fox_Lattice_var <- Fox_Lattice
+data.fox.var <- attr(Fox_Lattice_var, "data")
+attr(Fox_Lattice_var, "data") <- merge(data.fox.var, 
+                                       maps.cat.prob.zone, 
+                                       by = "ZONE_CODE")
+
+my.palette.var <- brewer.pal(n = 9, name = "BuPu")
+spplot(obj = Fox_Lattice_var, zcol = "cat.prob.zone",
+       col.regions = my.palette.var, add = T)
+```
+
+
+Note that the posterior mean is highest where we have the higher level of uncertainty. We have some area where the response variable reaches really high numbers, this is due to missing GS data in this areas (GS=0), so the model compensates for it; however, these are the areas where we also have the highest uncertainty, because the model is unable to produce accurate estimates.
+
+## geostatistical data
+
+For this analysis, we will be using geostatistical data, also known as marked points. This is one of the most common type of spatial data. It includes points (with associated coordinates), which have a value attached, which is generally the measurement of the response variable we are interested here. The idea is that these points are the realisation of a smooth spatial process that happens everywhere in space, and the points are just samples of this process (we will never be able to sample the entire process as there are infinite points in the continuous space).
+
+A classic example would be soil Ph: this is a property of the soil and it exists everywhere, but we will only measure it at some locations. By linking the values we have collected with other measurements we could find out that soil Ph is dependent on precipitation level, or vegetation type, and (with enough information) we could be able to reconstruct the underlying spatial process.
+
+We are generally interested in understanding the underlying process (which variable influences it? how does it change in space and time?) and to recreate it (by producing model predictions).
+
+In this example, we are going to be using the same points I used to generate the dataset for the spatial data (the Edinburgh fox scats), but we will be looking at the number of parasites species (Spp_Rich) found in each scat. The dataset include the location of each point (each one a scat found during the survey), but what we are interested in modelling here is the number of parasite species found in each scat. This means that each point in the dataset has a value attached (a mark, hence the name marked point process), which is what we are interested in modelling. In this case we do not have explicit neighbours for the points, so we will need to construct an artificial discretisation of the space and tell INLA the neighbouring structure of the discretisation.
+
+The dataset also contains a number of other variables associated with each sample:
+
+JanDate (the date when the sample was collected)
+Site (which park was it collected from),
+Greenspace variability (GS_Var) which is a categorical variable measuring the number of different greenspace types (Low, Med, High)
+
+In this case we are going to model the species richness of gastrointestinal parasites as a function of greenspace ratio, while taking into account both the spatial effect and the other covariates mentioned just above.
+
+When transforming the point dataset into a spatial object, we need to specify a Coordinate Reference System (CRS). The coordinates for this dataset are expressed in Easting / Northing and it’s projected using the British National Grid (BNG). This is important in case you are using multiple shapefiles which might not be in the same coordinate system, and they will have to be projected accordingly.
+
+NOTE: The choice of CRS should be done on the basis of the extent of the study area.
+
+Small areas - For small areas (such as this), Easting-Northing coordinate systems are best. They effectively express the coordinates on a flat surface (which does not take into account the globe curvature and consequent modification of the projection shape).
+
+Medium-sized studies - We should use Latitude-Longitude for medium-sized studies (country level/ multi country levels), as this will take into account a more realistic shape of the map.
+
+Continental and global-scale studies - Finally, for studies conducted at continental and global scale, we should use radians and fit the mesh taking into account the curvature of the globe.
+
+The type of coordinates is important as several steps in the code are unit-specific and should be modified accordingly. I will point them out as they come up. To illustrate this concept, I will plot the points against the shapefile of Scotland, derived from GADM website (an excellent source for administrative district shapefiles), which is mapped using Lat-Long.
+
+```{r 2 point data}
+
+Point_Data <- read.csv("Point_Data.csv")
+str(Point_Data )
+
+require(rgdal)
+
+# First, we need the coordinates of the points
+Loc <- cbind(Point_Data$Easting, Point_Data$Northing)
+# Then we can transform our dataset in a spatial object (a spatial point dataframe)
+Fox_Point <- SpatialPointsDataFrame(coords = Loc, data = Point_Data, match.ID = T,
+                                    proj4string = CRS("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs +ellps=airy +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894"))
+
+par(mfrow = c(1,1), mar = c(1,1,1,1))
+plot(Fox_Point, col = 2, pch = 16, cex = 0.5)
+
+# Load the UK shapefile and subset the Scotland polygon
+UK_Shape <- readOGR(dsn = "United Kingdom", layer = "gadm34_GBR_1")
+Scot_Shape <- UK_Shape[UK_Shape$NAME_1 == "Scotland",]
+
+# Using the proj4string() function we can check the projection of the shapefile
+proj4string(Scot_Shape)
+# You should see "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+#This is the standard latitude/longitude coordinate system, which is projected in a geodesic system (taking into account the curvature of the globe). Most shapefiles (especially at country level) will use this coordinate system. 
+
+plot(Fox_Point, col = 2, pch = 16, cex = 0.5)
+plot(Scot_Shape, add = T)
+```
+
+
+Trying to plot both our points and our shapefile in the same map will not work as they cannot be plotted in their coordinates are expressed in different systems.
+
+
+
+```{r 2 point data more projections}
+foxcrs <- CRS("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs +ellps=airy +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894")
+
+Scot_Shape_BNG <- spTransform(Scot_Shape, foxcrs)
+
+plot(Fox_Point, col = 2, pch = 16, cex = 0.5)
+plot(Scot_Shape_BNG, add = T)
+```
+
+
+Now that the data is properly loaded, we can start putting together all the components required by a geostatistical INLA model. We’ll start fitting just a simple base model with only an intercept and spatial effect in it and build up complexity from there.
+
+The absolutely essential component of a model are:
+
+The mesh
+
+The projector matrix
+
+The correlation structure specifier (spde)
+
+The formula
+
+
+### mesh
+Unlike the area data, point data do not have explicit neighbours and thus we would have to calculate the autocorrelation structure between each possible point existing in space, which is obviously imposssible. For this reason, the first step is to discretise the space to create a mesh that would create artificial (but useful) set of neighbours so we could calculate the autocorrelation between points. INLA uses a triangle mesh, because is much more flexible and can be adapted to irregular spaces. There are several options that can be used to adjust the mesh.
+
+I will not spend a lot of time explaining the mesh as there are a number of excellent tutorials that do a much better job than I could (check out this one for example), and I find defining the mesh is the easiest part of this INLA modelling process!
+
+```{r 2 point mesh}
+# Now we can construct the mesh around our points
+Mesh1 <- inla.mesh.2d(Loc, 
+                      max.edge = c(500))       # this part specify the maximum lenght of the triangle edge. 
+                                               # THIS NEEDS TO BE SPECIFIED IN COORDINATE UNITS (in this case this would be in metres)
+Mesh2 <- inla.mesh.2d(Loc, 
+                      max.edge = c(900, 2000)) # We can also specify an outer layer with a lower triangle density where there are no points to avoid edge effect
+
+Mesh3 <- inla.mesh.2d(Loc, 
+                      max.edge = c(900, 2000), 
+                      cutoff = 500)            # The cutoff is the distance at which two points will be considered as one. Useful for dataset with a lot of points clamped together
+
+Mesh4 <- inla.mesh.2d(Loc, 
+                      max.edge = c(900, 2000), 
+                      cutoff = 500, 
+                      offset = c(1000, 1000))    # The offset control the extension of the two layer (high and low triangle density)
+
+par(mfrow = c(2,2), mar = c(1,1,1,1))
+plot(Mesh1,asp = 1, main = "")
+points(Loc, col = 2, pch = 16, cex = 0.1)
+
+plot(Mesh2,asp = 1, main = "")
+points(Loc, col = 2, pch = 16, cex = 0.1)
+
+plot(Mesh3,asp = 1, main = "")
+points(Loc, col = 2, pch = 16, cex = 0.1)
+
+plot(Mesh4,asp = 1, main = "")
+points(Loc, col = 2, pch = 16, cex = 0.1)
+```
+
+Ideally, we aim to have a regular mesh with an inner layer of triangles, without clumping and with a smooth, lower density of triangles on the outer layer.
+
+The third Mesh seems the most regular and appropriate for this dataset.
+
+```{r 2 point mesh decision}
+par(mfrow = c(1,1), mar = c(1,1,1,1))
+plot(Mesh3,asp = 1, main = "")
+points(Fox_Point, col = 2, pch = 16, cex = 1)
+plot(Scot_Shape_BNG, add=T)
+```
+
+NOTE: You can see that the mesh extends past the coastline into the sea. Since we are trying to evaluate the effect of greenspace ratio on the parasite species of foxes, it makes no sense to include area that are part of the sea in the mesh. There are two possible solutions: the first is to run the model using this mesh and then simply ignore the results the model provides for the sea area. The second is to modify the mesh to reflect the coastline.
+
+Keep in mind that you can either use shapefiles or create nonconvex hulls around the data and use those shapes to create bespoke meshes. Check out the Blangiardo & Cameletti book(chapter 6) for more exhaustive examples.
+
+### projector matrix
+
+
+Now that we have constructed our mesh, we need to relate the data points to the mesh vertices. The projector matrix provides the model with the neighborhood structure of the dataset using the mesh vertex as explicit neighbours
+
+As mentioned before, geostatistical data do not have explicit neighbours, so we need to artificially discretise the space using the mesh. The projector matrix projects the points onto the mesh where each vertex has explicitly specified neighbours. If the data point falls on the vertex (a vertex is each angular point of a polygon, here a triangle), then it will be directly related to the adjacent vertices (like the blue point in the figure). However, if the datapoints falls within a mesh triangle (dark red point), its weight will be split between the tree vertices according to the proximity of the to each vertex (the red, orange and yellow points with the dark border). The original data point will then have a larger number of “pseudo-neighbours” according to the neighbours of vertices defining the triangles, weighted in a similar manner than those vertices (however, the total weight of each datapoint will always be one.
+
+
+The projector matrix automatically computes the weight vector for the neighbourhood of each point and is calculated by providing the mesh and the locations of the datapoints to the inla.spde.make.A() function.
+
+```{r 2 point A }
+A_point <- inla.spde.make.A(Mesh3, loc = Loc)
+dim (A_point)
+# [1] 223 849    # Number of points  # Number of nodes int he mesh
+```
+
+
+### spde
+
+The SPDE (Stochastic Partial Differential Equation) is the mathematical solution to the Matérn covariance function and it is effectively what allows INLA to efficiently compute the spatial autocorrelation structure of the dataset at the mesh vertices. It calculates the correlation structure between the vertices of the mesh (which will then be weighted by the vectors calculated using the projector matrix to calculate the correlation matrix applicable to the actual dataset).
+
+```{r 2 point spde}
+spde1 <- inla.spde2.matern(Mesh3, 
+                            alpha = 2) # alpha is 2 by default, for most models this can be left as it is (needs to be adjusted for 3D meshes)
+
+spde1$n.spde
+#[1] 849   # the dimension of the spde is the same as the mesh vertices
+```
+
+### basic model 
+
+Fitting a basic spatial model
+We will first fit a model only including an intercept and the spatial effect to show how to code this. This model is simply testing the effect of the spatial autocorrelation on the parasite species richness, without including any other covariate.
+
+One thing to keep in mind is that INLA syntax codes nonlinear effects using the format f(Covariate Name, model = Effect Type). In the case of the spatial effect, the model name is the name you assigned to the SPDE (spde1 in this case). Stay tuned for other type of nonlinear effects coming up later in the tutorial!
+
+```{r 2 p m1}
+#First, we specify the formula
+formula_p1 <- y ~ -1 + Intercept +
+  f(spatial.field1, model = spde1)       # this specifies the spatial random effect. The name (spatial.field1) is of your choosing but needs to be the same you will include in the model 
+
+# Now we can fit the proper model using the inla() function 
+Mod_Point1 <- inla(formula_p1,
+                data = list( y = Point_Data$Spp_Rich,         # response variable
+                            Intercept = rep(1,spde1$n.spde),   # intercept (manually specified)
+                            spatial.field1 = 1:spde1$n.spde),  # the spatial random effect (specified with the matern autocorrelation structure from spde1)   
+                control.predictor = list( A = A_point, 
+                                          compute = T),       # this tells the model to compute the posterior marginals for the linear predictor
+                control.compute = list(cpo = T))
+
+# We can access the summary of fixed (just intercept here) and random effects by using 
+round(Mod_Point1$summary.fixed,3)
+round(Mod_Point1$summary.hyperpar[1,],3)
+
+```
+
+
+
+We can also compute the random term variance by using the emarginal() function (remember that INLA works with precisions so we cannot directly extract the variance).
+
+NOTE: INLA offers a number of functions to manipulate posterior marginals. We are only going to use the emarginal() (which computes the expectations of a function and is used, among other things, to transform precision to variance) for this tutorial, but it is worth knowing that there is a full roster of function for marginal manipulation, such as sampling from the marginals, transforming them or computing summary statistics.
+
+
+```{r 2 p variance}
+inla.emarginal(function(x) 1/x, Mod_Point1$marginals.hyper[[1]])
+
+# In order to extract the relevant information on the spatial field we will need to use the inla.spde2.result() function
+Mod_p1.field <- inla.spde2.result(inla = Mod_Point1, 
+                                 name = "spatial.field1", spde = spde1, 
+                                 do.transf = T)     # This will transform the results back from the internal model scale 
+
+names(Mod_p1.field) # check the component of Mod_p1.field
+
+inla.emarginal(function(x) x, Mod_p1.field$marginals.kappa[[1]])             #posterior mean for kappa
+inla.hpdmarginal(0.95, Mod_p1.field$marginals.kappa[[1]])                    # credible intervarls for Kappa
+
+inla.emarginal(function(x) x, Mod_p1.field$marginals.variance.nominal[[1]])  #posterior mean for variance
+inla.hpdmarginal(0.95, Mod_p1.field$marginals.variance.nominal[[1]])         # CI for variance
+
+inla.emarginal(function(x) x, Mod_p1.field$marginals.range.nominal[[1]])     #posterior mean for r (in coordinates units)
+inla.hpdmarginal(0.95, Mod_p1.field$marginals.range.nominal[[1]])            # CI for r
+```
+
+
+The two most important things we can extract here are the range parameter (kappa), the nominal variance (sigma) and the range (r, radius where autocorrelation falls below 0.1)). These are important parameters of the spatial autocorrelation: the higher the Kappa, the smoother the spatial autocorrelation structure (and the highest the range). Shorter range indicates a sharp increase of autocorrelation between closely located points and a stronger autocorrelation effect.
+
+
+Normally we are interested in fitting models that include covariates (and we are interested in how these covariates influence the response variable while taking into account spatial autocorrelation. In this case, we need to add another step in the model construction. We will retain the same mesh we used before (Mesh3), and the projector matrix (A_point), and we will continue from there. I am going to mention in passing a variety of customisations to the model (such as spatio-temporal modelling). While I think it’s beyond the scope of this practical for me to go into details for the many possible customisations, you can find a lot of useful examples (and code) in the recent book “Advanced Spatial Modeling with Stochastic Partial Differential Equations Using R and INLA”, which also includes really useful tables of customisation options for the inla() function.
+
+We are now going to expand our model to include all the available components:
+
+The mesh
+The projector matrix
+The correlation structure specifier (SPDE), including PC priors on the spatial structure
+The spatial index
+The stack
+The formula
+
+### pc priors
+We can provide priors to the spatial term. A special kind of priors (penalised complexity or pc priors) can be imposed on the SPDE. These priors are widely used as they (as the name suggests) penalise the complexity of the model. In practice they shrink the spatial model towards the base model (one without a spatial term). To do so we apply weakly informative priors that penalise small ranges and large variances. Check out the Fulgstag et al (2018) paper for a more detailed theoretical explanation of how PC priors work.
+
+```{r 2 p pc priors}
+spde.pc   <- inla.spde2.pcmatern(Mesh3,                      # inla.spde2.pcmatern() instead of inla.spde2.matern()"
+                                 prior.range = c(500,0.01),  # the probability that the range is less than 300 (unit) is 0.01. The range here should be rather large (compare to the dataset extension)
+                                 prior.sigma = c(1, 0.01))   # the probability that variance (on the log scale) is more that 1 is 0.01 
+```
+
+
+### spatial index 
+
+One useful step includes constructing a spatial index. This will provide all the required elements to the SPDE model. This is not strictly necessary, unless you want to create multiple spatial fields (e.g. year-specific spatial fields). The number of replicates will produce iid independent, identically distributed replicates (the variance will be equally distributed between the levels, which is equivalent to a GLM standard factorial effect), while the number of groups will produce dependent replicates (each level of the group will depend from the previous/following one).
+
+Shown beneath are the default settings for the index (no replicates or groups are specified):
+
+```{r 2 p spatial index}
+s.index <- inla.spde.make.index(name = "spatial.field2",
+                                n.spde = spde.pc$n.spde,
+                                n.group = 1,
+                                n.repl = 1)
+```
+
+
+### stack 
+
+The stack has become infamous for being particularly fiddly to handle, but in short, it provides all the elements that are going to be used in the model. It includes the data, the covariates (including linear and non-linear ones), and the index for each of them. One thing that is useful to remeber is that the stack does NOT automatically include an intercept, so this will need to be specified explicitly.
+
+```{r 2 p stack }
+# We need to limit the number of levels that greeen space (GS_Ratio) has. This way, GS can only have 100 levels between 0 and 100
+Point_Data$GS_Ratio2 <- round(Point_Data$GS_Ratio*100)
+
+StackEst <- inla.stack(data = list(y = Point_Data$Spp_Rich),               # First off, the response variable
+
+                        A = list(A_point, 1),                              # Then the projector matrix (for the spatial effect) and a linear vector (1) for the other effects
+                        
+                        effects = list(c(s.index, list(Intercept = 1)),    # The effects are organised in a list of lists. spatial effect and intercept first
+
+                                       list(GS_Var = Point_Data$GS_Var,    # Then all the other effects. We will specify the type of effect using the formula
+                                            GS_Ratio = Point_Data$GS_Ratio2,
+                                            JanDate = Point_Data$JanDate,
+                                            SiteID = Point_Data$Site)),
+                        
+                        tag="Est")                                          # The tag specify the name of this stack
+```
+
+
+NOTE: The intercept in this case is fit to be constant in space (it is fit together with the spatial effect, which means that it is always 1 at each of the n.spde vertices of the mesh). This is not necessarily the case, if you want to fit the intercept to be constant through the dataset (and hence be affected by the spatial effect), you can code it together with the list of the other covariates, but keep in mind that then you will need to specify intercept as Intercept = rep(1, n.dat), where n.dat is the number of datapoints in the dataset (rather then the number of mesh vertices).
+
+
+### complex spatial model 
+
+In the formula, we specify what kind of effect each covariate should have. Linear variables are specified in a standard GLM way, while random effects and non-linear effects need to be specified using the f(Cov Name, model = Effect Type) format, similarly to what we have seen so far for the spatial effect terms.
+
+Finally, we’re ready to run the model. This include the stack (which data are to be included), the formula (how are the covariates modelled), and the details about the model (such as computing model selection tools or make predictions). This model tests the effect of the GS_ratio (the greenspace ratio) and GS variability on the parasite species richness, while accounting for spatial autocorrelation, temporal autocorrelation and the site where the sample was found (to account for repeat sampling).
+
+
+```{r 2 p sp model}
+
+formula_p2 <- y ~ - 1 + Intercept + GS_Var +  # linear covariates
+  f(spatial.field2, model = spde.pc) +        # the spatial effect is specified using the spde tag (which is why we don't use the "" for it)
+  f(GS_Ratio, model = "rw2") +                # non-linear effects such as random walk and autoregressive effects (rw1/rw2/ar1) can be add like this
+  f(JanDate,model = "rw1") +                  # rw1 allows for less smooth transitions between nodes (useful for temporal data)
+  f(SiteID,model = "iid")                     # Categorical random effects can be added as independent identically distributed effects ("iid")
+  
+
+Mod_Point2 <- inla(formula_p2,
+               data = inla.stack.data(StackEst, spde=spde.pc),
+               family = "poisson",
+               control.compute = list(cpo = TRUE),
+               control.predictor = list(A = inla.stack.A(StackEst), 
+                                        compute = T))
+
+# This time we will have more effects to examine in the fixed and random effect summaries
+round(Mod_Point2$summary.fixed,3)
+round(Mod_Point2$summary.hyperpar,3)
+
+# We can extract the posterior mean of the variance for the other random effects
+inla.emarginal(function(x) 1/x, Mod_Point2$marginals.hyperpar$`Precision for SiteID`)
+inla.emarginal(function(x) 1/x, Mod_Point2$marginals.hyperpar$`Precision for JanDate`)
+inla.emarginal(function(x) 1/x, Mod_Point2$marginals.hyperpar$`Precision for GS`)
+
+# And plot the non-linear effects (GS ratio and Jandate (when the data were collected)), to see if they have a distinct effect 
+par(mfrow = c(1,1), mar = c(4,3,1,1))
+plot(Mod_Point2$summary.random$GS_Ratio[,1:2], 
+     type = "l", 
+     lwd = 2, 
+     xlab = "GS_Ratio",
+     ylab = "",
+     cex.axis = 2,
+     cex.lab = 2)
+for(i in c(4,6)) 
+  lines(Mod_Point2$summary.random$GS_Ratio[,c(1,i)], lty = 2)
+abline(h = 0, lty = 3)
+
+
+plot(Mod_Point2$summary.random$JanDate[,1:2], 
+     type = "l", 
+     lwd = 2, 
+     xlab = "Jandate",
+     ylab = "",          
+     cex.axis = 2,
+     cex.lab = 2)
+for(i in c(4,6)) 
+  lines(Mod_Point2$summary.random$JanDate[,c(1,i)], lty = 2)
+abline(h = 0, lty = 3)
+```
+
+The amount of greenspace (GS Ratio) is clearly positively correlated with species richness, but the effect is fairly linear, so we might want to consider fitting it as a linear effect in the next model (we won’t loose much information by doing so).
+
+
+### spatial field
+
+Now we can extract some further information about the spatial field.
+
+```{r 2 p sp field}
+# Extract the information on the spatial field 
+Mod_p2.field <- inla.spde2.result(inla = Mod_Point2, 
+                                  name = "spatial.field2", 
+                                  spde = spde.pc, 
+                                  do.transf = T)
+
+inla.emarginal(function(x) x, Mod_p2.field$marginals.kappa[[1]])
+inla.hpdmarginal(0.95, Mod_p2.field$marginals.kappa[[1]])    
+
+inla.emarginal(function(x) x, Mod_p2.field$marginals.variance.nominal[[1]]) 
+inla.hpdmarginal(0.95, Mod_p2.field$marginals.variance.nominal[[1]])
+
+inla.emarginal(function(x) x, Mod_p2.field$marginals.range.nominal[[1]])  
+inla.hpdmarginal(0.95, Mod_p2.field$marginals.range.nominal[[1]])   
+```
+
+We might also be interested in visualising the Gaussian random field (GRF). As mentioned before, the GRF represents the variation of the response variable in space, once all the covariates in the model are accounted for. It could be seen as “the real distribution of the response variable in space”.
+
+However, this can also reflect the lack of an important covariate in the model, and examining the spatial distribution GRF could reveal which covariates are missing, For example, if elevation is positively correlated with the response variable, but it is not included in the model, we could see a higher posterior mean in areas with higher elevation. A researcher familiar with the terrain would be able to recognise this and improve the model accordingly.
+
+```{r 2 p gaussian random field}
+points.em <- Mesh3$loc
+
+stepsize <- 150                           # This is given in coordinates unit (in this case this is straightforward and correspond to 150m)
+east.range <- diff(range(points.em[,1]))  # calculate the length of the Easting range
+north.range <- diff(range(points.em[,2])) # calculate the length of the Northing range
+
+nxy <- round(c(east.range, north.range)/stepsize)  # Calculate the number of cells in the x and y ranges
+
+# Project the spatial field on the mesh vertices using the inla.mesh.projector() function
+projgrid <- inla.mesh.projector(Mesh3, 
+                                xlim = range(points.em[,1]),
+                                ylim = range(points.em[,2]),
+                                dims = nxy)
+xmean <- inla.mesh.project(projgrid,
+                           Mod_Point2$summary.random$spatial.field2$mean)
+xsd <- inla.mesh.project(projgrid,
+                         Mod_Point2$summary.random$spatial.field2$sd)
+
+#We need to create spatial objects for the mean and variance of the GRF.
+
+require(raster)
+
+xmean2 <- t(xmean)
+xmean3 <- xmean2[rev(1:length(xmean2[,1])),]
+xmean_ras <- raster(xmean3,
+                    xmn = range(projgrid$x)[1], xmx = range(projgrid$x)[2],
+                    ymn = range(projgrid$y)[1], ymx = range(projgrid$y)[2],
+                    crs = CRS("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs +ellps=airy +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894"))
+
+xsd2 <- t(xsd)
+xsd3 <- xsd2[rev(1:length(xsd2[,1])),]
+xsd_ras <- raster(xsd3,
+                  xmn = range(projgrid$x)[1], xmx =range(projgrid$x)[2],
+                  ymn = range(projgrid$y)[1], ymx =range(projgrid$y)[2],
+                  crs = CRS("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs +ellps=airy +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894"))
+
+# xmean_ras and xsd_ras are raster items and can be exported, stored and manipulated outside R (including in GIS softwares) using the function writeRaster().
+
+#Now we can plot the GRF (I used the same colour scheme as the areal data):
+
+my.palette.post <- rev(brewer.pal(n = 9, name = "YlGnBu"))
+my.palette.var <- brewer.pal(n = 9, name = "BuPu")
+
+par(mfrow = c(1,1), mar = c(2,2, 1,1))
+plot(xmean_ras, asp = 1, col = my.palette.post)
+points(Fox_Point, pch = 16, cex = 0.5)
+plot(Scot_Shape_BNG, add = T) 
+
+plot(xsd_ras, asp = 1, col = my.palette.var)
+points(Fox_Point, pch = 16, cex = 0.5) 
+plot(Scot_Shape_BNG, add = T) 
+```
+
+
+
+### plot spatial predictions and gaussian random field
+
+
+Finally, I’m going to show how to produce spatial predictions from INLA models. This will involve a bit of manipulation of rasters and matrices. Essentially it comes down to creating a spatial grid of coordinates where we do not have values but wish to generate an prediction for the response variable using the model estimations (taking into account the spatial autocorrelation structure of the data).
+
+
+```{r 2 p raster}
+# The first step is to load the prediction raster file (this one is a ASCII file). 
+require(raster)
+require(rgdal)
+GS_Pred <- raster("GS_Pred/GS_Pred_Ras.txt")
+
+# This is simply a raster map of greeenspace values (precentage of greenspace per raster cell) plotted for the entire Edinburgh area.
+require(RColorBrewer)
+my.palette_GS <- brewer.pal(n = 9, name = "Greens")
+plot(GS_Pred, col = my.palette_GS)
+points(Fox_Point, pch = 16, cex = 0.5) 
+```
+
+To produce predictions using INLA, we need to generate a dataset (with attached coordinates on the locations we wish to predict to) and attach a series of missing observation to it (coded as NA in R). When the missing observations are in the response variable, INLA automatically computes the predictive distribution of the corresponding linear predictor and fitted values.
+
+Using INLA syntax is possible to generate model preditions by fitting a stack where the response variable is set as NAs, and then join this stack with the estimation stack (which is similar to what we have used so far). Then we can extract the values of the predicted response variable and use the inla.mesh.projector() function to project these values on the mesh vertices (like we have been doing when plotting the GRF earlier on).
+
+To start, we transform the raster values for the amount of green space (GS ratio) into a matrix and then reallocate the coordinates to a matrix of ncol X nrow cells (numbers of columns and rows).
+
+
+
+
+
+
+
+
+
+
