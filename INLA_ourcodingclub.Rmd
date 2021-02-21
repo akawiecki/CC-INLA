@@ -1246,7 +1246,7 @@ Finally, I’m going to show how to produce spatial predictions from INLA models
 # The first step is to load the prediction raster file (this one is a ASCII file). 
 require(raster)
 require(rgdal)
-GS_Pred <- raster("GS_Pred/GS_Pred_Ras.txt")
+GS_Pred <- raster("GS_Pred/gs_pred_raster.txt")
 
 # This is simply a raster map of greeenspace values (precentage of greenspace per raster cell) plotted for the entire Edinburgh area.
 require(RColorBrewer)
@@ -1260,6 +1260,138 @@ To produce predictions using INLA, we need to generate a dataset (with attached 
 Using INLA syntax is possible to generate model preditions by fitting a stack where the response variable is set as NAs, and then join this stack with the estimation stack (which is similar to what we have used so far). Then we can extract the values of the predicted response variable and use the inla.mesh.projector() function to project these values on the mesh vertices (like we have been doing when plotting the GRF earlier on).
 
 To start, we transform the raster values for the amount of green space (GS ratio) into a matrix and then reallocate the coordinates to a matrix of ncol X nrow cells (numbers of columns and rows).
+
+
+```{r 2 p prediction cmponents}
+GS_Matrix <- matrix(GS_Pred)
+
+str(GS_Matrix)
+
+y.res <- GS_Pred@nrows
+x.res <- GS_Pred@ncols
+
+#Next, we need to create a grid of ncol X nrow cells containing the coordinates of the points where we wish to project our model predictions.
+
+Seq.X.grid <- seq(from = GS_Pred@extent@xmin,
+                  to = GS_Pred@extent@xmax,
+                  length = x.res) 
+
+Seq.Y.grid <- seq(from = GS_Pred@extent@ymin,
+                  to = GS_Pred@extent@ymax,
+                  length = y.res)
+
+pred.grid <- as.matrix(expand.grid(x = Seq.X.grid,
+                                   y = Seq.Y.grid)) 
+
+str(pred.grid)
+
+#Now that we the grid with the coordinates of each cell centroid we can procede to make the mesh SPDE and spatial index as usual.
+
+MeshPred <- inla.mesh.2d(Loc, max.edge = c(900, 2000),
+                         cutoff = 300) 
+
+spde.pred <- inla.spde2.matern(mesh = MeshPred,
+                               alpha = 2)
+
+s.index.p <- inla.spde.make.index(name = "sp.field.pred", 
+                                  n.spde = spde.pred$n.spde) 
+
+```
+
+
+
+Since the points where we want to project our predictions are different from the datapoints, we need two different projector matrices. The first one is the standard one we have used so far (A_est), while the second does not contain point locations since we will project the model results directly on the mesh vertices. Similarly, we will need two stacks, one for estimations and one for predictions, joined using the inla.stack() function to form a joined stack.
+
+
+```{r 2 p pred stack }
+A_est <- inla.spde.make.A(mesh = MeshPred, 
+                          loc = Loc)
+
+A_pred <- inla.spde.make.A(mesh = MeshPred)
+
+
+StackEst <- inla.stack(data = list(y = Point_Data$Spp_Rich),
+                       A = list(A_est, 1),
+                       effects = list(c(s.index.p, list(Intercept = 1)), 
+                                      list(GS_Ratio = Point_Data$GS_Ratio2)),
+                       tag = "Est")
+
+stackPred <- inla.stack(data = list(y = NA),  # NAs in the response variable  
+                        A = list(A_pred),
+                        effects = list(c(s.index.p, list(Intercept = 1))),
+                        tag = "Pred")
+
+StackJoin <- inla.stack(StackEst, stackPred)
+
+```
+
+```{r 2 p prediction fomula}
+formula_Pred <- y ~ -1 + Intercept + 
+  f(GS_Ratio, model = "rw2") +
+  f(sp.field.pred, model = spde.pred)
+
+Mod_Pred <-  inla(formula_Pred, 
+                  data = inla.stack.data(StackJoin, spde = spde.pred),
+                  family = "poisson",
+                  control.predictor = list(A = inla.stack.A(StackJoin), 
+                                         compute = T))
+```
+
+We need to extract the index of the data from the prediction part of the stack (using the tag “Pred” we assigned to the stack) and use it to select the relevant posterior mean and sd for the predicted response variable. Then we use the inla.mesh.projector() function to calculate the projection from the Mesh to the grid we created (pred.grid).
+
+```{r 2 p prediction grid}
+index.pred <- inla.stack.index(StackJoin, "Pred")$data
+
+post.mean.pred <- Mod_Pred$summary.linear.predictor[index.pred, "mean"]
+post.sd.pred <- Mod_Pred$summary.linear.predictor[index.pred, "sd"]
+
+proj.grid <- inla.mesh.projector(MeshPred, 
+                                 xlim = range(pred.grid[,1]), 
+                                 ylim = range(pred.grid[,2]))
+#, dims = c(ncol,nrow))
+```
+
+Finally, we project the values we extracted from the model on the lattice we have created and transform the projected predictions to a raster object as we did before with the GRF and plot them in a similar fashion (we do this for both the mean and standard deviation).
+
+```{r 2 p plot the pred}
+post.mean.pred.grid <- inla.mesh.project(proj.grid, post.mean.pred)
+post.sd.pred.grid <- inla.mesh.project(proj.grid, post.sd.pred)
+
+predmean <- t(post.mean.pred.grid)
+predmean2 <- predmean[rev(1:length(predmean[,1])),]
+predmean_ras <- raster(predmean2,
+                      xmn = range(projgrid$x)[1], xmx = range(projgrid$x)[2],
+                      ymn = range(projgrid$y)[1], ymx = range(projgrid$y)[2],
+                      crs = CRS("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs +ellps=airy +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894"))
+
+predsd <- t(post.sd.pred.grid)
+predsd2 <- predsd[rev(1:length(predsd[,1])),]
+predsd_ras <- raster(predsd2,
+                       xmn = range(projgrid$x)[1], xmx = range(projgrid$x)[2],
+                       ymn = range(projgrid$y)[1], ymx = range(projgrid$y)[2],
+                       crs = CRS("+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +datum=OSGB36 +units=m +no_defs +ellps=airy +towgs84=446.448,-125.157,542.060,0.1502,0.2470,0.8421,-20.4894"))
+
+# plot the model predictions for mean
+par(mfrow = c(1,1), mar = c(2,2, 1,1))
+plot(predmean_ras, asp = 1, col = my.palette.post)
+points(Fox_Point, pch = 16, cex = 0.5)
+plot(Scot_Shape_BNG, add = T) 
+
+# plot the model predictions for sd
+par(mfrow = c(1,1), mar = c(2,2, 1,1))
+plot(predsd_ras, asp = 1, col = my.palette.var)
+points(Fox_Point, pch = 16, cex = 0.5)
+plot(Scot_Shape_BNG, add = T) 
+```
+
+
+In the interest of keeping this tutorial short(ish), I have only presented an example of producing model predictions at unsampled locations. But keep in mind that producing predictions for model validation is relatively straightforward (e.g., when you want to check how the real values and the model predictions compare, and you should be able to do it using the code I presented here as a template). Feel free to have a go if you’d like a challenge!
+
+You just need to split the dataset in two (one part used for estimation, the other for validation) and assign NAs to the response variable of the validation subset (while retaining coordinates and the rest of the covariate), then prepare a separate validation projection matrix (A_Val) and a validation stack, similarly to what we have done here. Finally, when you run the model you can access the predicted values for the validation data by using the inla.stack.index() function and use it to evaluate the predictive power of your model.
+
+
+
+
 
 
 
